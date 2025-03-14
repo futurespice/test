@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Приход ЭБД - Сравнение QR-кодов</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 30px;
+        }
+
+        .file-input-group {
+            margin-bottom: 20px;
+            text-align: left;
+        }
+
+        .file-label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #555;
+        }
+
+        .file-description {
+            font-size: 14px;
+            color: #777;
+            margin-bottom: 10px;
+        }
+
+        input[type="file"] {
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            width: 100%;
+            box-sizing: border-box;
+            background-color: #f9f9f9;
+        }
+
+        button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            font-size: 16px;
+            cursor: pointer;
+            border-radius: 5px;
+            margin-top: 20px;
+            transition: background-color 0.3s;
+        }
+
+        button:hover {
+            background-color: #45a049;
+        }
+
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+
+        #result {
+            margin-top: 30px;
+            text-align: center;
+            padding: 15px;
+            border-radius: 5px;
+        }
+
+        #result.success {
+            background-color: #dff0d8;
+            color: #3c763d;
+        }
+
+        #result.error {
+            background-color: #f2dede;
+            color: #a94442;
+        }
+
+        #result a {
+            display: inline-block;
+            margin: 10px 0;
+            padding: 10px 20px;
+            background-color: #337ab7;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            transition: background-color 0.3s;
+        }
+
+        #result a:hover {
+            background-color: #286090;
+        }
+
+        .quantity-difference {
+            margin-top: 15px;
+            font-size: 18px;
+            color: #a94442;
+            font-weight: bold;
+            padding: 10px;
+            background-color: #f2dede;
+            border-radius: 5px;
+            display: inline-block;
+        }
+
+        .loading {
+            display: none;
+            margin: 20px auto;
+            text-align: center;
+        }
+
+        .loading-spinner {
+            border: 6px solid #f3f3f3;
+            border-top: 6px solid #3498db;
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+
+        .loading-text {
+            color: #666;
+            font-size: 16px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        footer {
+            margin-top: 50px;
+            color: #777;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Сравнение QR-кодов ЭБД</h1>
+
+        <div class="file-input-group">
+            <div class="file-label">Первый файл (из ДЛО):</div>
+            <div class="file-description">Excel-файл с сериями и QR-кодами, загруженный с сайта ДЛО</div>
+            <input type="file" id="file1" accept=".xlsx, .xls">
+        </div>
+
+        <div class="file-input-group">
+            <div class="file-label">Второй файл (отсканированные QR):</div>
+            <div class="file-description">Excel-файл с фактически отсканированными QR-кодами со склада</div>
+            <input type="file" id="file2" accept=".xlsx, .xls">
+        </div>
+
+        <button onclick="uploadFiles()" id="compareButton">Сравнить файлы</button>
+
+        <div class="loading" id="loadingIndicator">
+            <div class="loading-spinner"></div>
+            <div class="loading-text">Выполняется обработка файлов...</div>
+            <div class="loading-text" id="loadingDetails">Это может занять несколько минут при большом объеме данных</div>
+        </div>
+
+        <div id="result" style="display:none;"></div>
+        <div id="quantity-diff" class="quantity-difference" style="display:none;"></div>
+    </div>
+
+    <footer>
+        © 2025 Приход ЭБД - Система сравнения QR-кодов
+    </footer>
+
+    <script>
+        const SERVER_URL = window.location.origin;
+
+        async function uploadFiles() {
+            let file1 = document.getElementById("file1").files[0];
+            let file2 = document.getElementById("file2").files[0];
+            const compareButton = document.getElementById("compareButton");
+            const loadingIndicator = document.getElementById("loadingIndicator");
+            const resultDiv = document.getElementById("result");
+            const quantityDiffDiv = document.getElementById("quantity-diff");
+
+            // Сброс предыдущих результатов
+            resultDiv.style.display = "none";
+            resultDiv.className = "";
+            quantityDiffDiv.style.display = "none";
+
+            if (!file1 || !file2) {
+                alert("Пожалуйста, загрузите оба файла!");
+                return;
+            }
+
+            // Показываем индикатор загрузки
+            compareButton.disabled = true;
+            loadingIndicator.style.display = "block";
+
+            // Создаем объект FormData для отправки файлов
+            let formData = new FormData();
+            formData.append("file1", file1);
+            formData.append("file2", file2);
+
+            try {
+                // Отображаем более детальную информацию о процессе
+                const loadingDetails = document.getElementById("loadingDetails");
+                loadingDetails.textContent = "Загрузка файлов на сервер...";
+
+                // Отправляем запрос
+                let response = await fetch(`${SERVER_URL}/compare/`, {
+                    method: "POST",
+                    body: formData
+                });
+
+                loadingDetails.textContent = "Анализ данных...";
+
+                if (!response.ok) {
+                    let error = await response.json();
+                    throw new Error(error.detail || "Произошла ошибка на сервере");
+                }
+
+                let result = await response.json();
+
+                // Показываем результаты
+                resultDiv.style.display = "block";
+
+                if (result.message) {
+                    // Нет различий
+                    resultDiv.innerHTML = `<p>${result.message}</p>`;
+                    resultDiv.className = "success";
+                } else {
+                    // Есть различия
+                    resultDiv.innerHTML = `
+                        ${result.txt_url ? `<a href="${SERVER_URL}${result.txt_url}" download>📥 Скачать отчет о различиях (TXT)</a>` : ""}
+                    `;
+                    resultDiv.className = "error";
+
+                    if (result.quantity_diff) {
+                        quantityDiffDiv.innerHTML = result.quantity_diff;
+                        quantityDiffDiv.style.display = "block";
+                    }
+                }
+            } catch (error) {
+                resultDiv.style.display = "block";
+                resultDiv.innerHTML = `<p>Ошибка при обработке файлов: ${error.message}</p>`;
+                resultDiv.className = "error";
+            } finally {
+                // Скрываем индикатор загрузки
+                loadingIndicator.style.display = "none";
+                compareButton.disabled = false;
+            }
+        }
+
+        // Добавляем обработчики событий для проверки наличия файлов
+        document.getElementById("file1").addEventListener("change", updateButtonState);
+        document.getElementById("file2").addEventListener("change", updateButtonState);
+
+        function updateButtonState() {
+            const file1 = document.getElementById("file1").files[0];
+            const file2 = document.getElementById("file2").files[0];
+            const compareButton = document.getElementById("compareButton");
+
+            compareButton.disabled = !(file1 && file2);
+        }
+
+        // Инициализация состояния кнопки
+        updateButtonState();
+    </script>
+</body>
+</html>
