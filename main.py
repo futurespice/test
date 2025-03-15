@@ -7,7 +7,8 @@ from io import BytesIO
 import os
 import logging
 import re
-
+import time
+from typing import Tuple, Set, List, Dict, Optional
 
 # Настройка логирования
 logging.basicConfig(
@@ -28,7 +29,7 @@ os.makedirs(STATIC_DIR, exist_ok=True)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
-def clean_code(value):
+def clean_code(value) -> Optional[str]:
     """Очистка QR-кода или серии от лишних символов"""
     if pd.isna(value) or value is None:
         return None
@@ -36,23 +37,23 @@ def clean_code(value):
     return str(value).strip().strip('"').strip("'").replace('\n', '').replace('\r', '')
 
 
-def is_valid_qr(value):
+def is_valid_qr(value) -> bool:
     """Проверка валидности QR-кода (должен содержать много цифр)"""
     if not value or pd.isna(value):
         return False
     value_str = str(value).strip()
-    # Строка должна быть в основном из цифр и достаточно длинной для QR-кода
+    # QR-код должен содержать достаточное количество цифр
     digit_count = sum(c.isdigit() for c in value_str)
     return digit_count >= 10 and len(value_str) >= 15
 
 
-def is_valid_series(value):
-    """Проверка валидности серии (6-8 цифр)"""
+def is_valid_series(value) -> bool:
+    """Проверка валидности серии (обычно 4-12 символов)"""
     if not value or pd.isna(value):
         return False
     value_str = str(value).strip()
-    # Серия обычно состоит из 6-8 цифр
-    return len(value_str) >= 4 and len(value_str) <= 12 and sum(c.isdigit() for c in value_str) >= 4
+    # Серийный номер обычно состоит из 4-12 символов
+    return len(value_str) >= 4 and len(value_str) <= 20 and sum(c.isdigit() or c.isalpha() for c in value_str) >= 3
 
 
 def find_qr_series_columns(df):
@@ -64,49 +65,59 @@ def find_qr_series_columns(df):
     for col in df.columns:
         col_str = str(col).lower()
 
+        # Ищем колонку с серийными номерами по имени
+        if any(keyword in col_str for keyword in ['серия', 'серии', 'series', 'партия', 'серийный']):
+            series_column = col
+            logger.info(f"Найдена колонка с серийными номерами по имени: {col}")
+
         # Ищем колонку с QR-кодами по имени
         if any(keyword in col_str for keyword in ['qr', 'код', 'штрих', 'штрихкод', 'datamatrix']):
             qr_column = col
             logger.info(f"Найдена колонка QR по имени: {col}")
 
-        # Ищем колонку с сериями по имени
-        if any(keyword in col_str for keyword in ['серия', 'серии', 'series', 'партия']):
-            series_column = col
-            logger.info(f"Найдена колонка Серия по имени: {col}")
+    # 2. Если серийный номер не найден по имени, ищем по содержимому
+    if series_column is None:
+        series_counts = {}
+        for col in df.columns:
+            # Проверяем только первые 100 строк для ускорения
+            sample = df[col].head(100)
+            valid_series = sample.apply(is_valid_series).sum()
+            if valid_series > 0:
+                series_counts[col] = valid_series
 
-    # 2. Если по имени не нашли, ищем по содержимому
+        if series_counts:
+            # Выбираем колонку с наибольшим количеством серий
+            series_column = max(series_counts.items(), key=lambda x: x[1])[0]
+            logger.info(
+                f"Найдена колонка с серийными номерами по содержимому: {series_column} ({series_counts[series_column]} серий)")
+
+    # 3. Если QR не найден по имени, ищем по содержимому
     if qr_column is None:
         qr_counts = {}
         for col in df.columns:
-            valid_qrs = df[col].apply(is_valid_qr).sum()
-            if valid_qrs > 0:
-                qr_counts[col] = valid_qrs
+            if col != series_column:  # Исключаем колонку с сериями
+                # Проверяем только первые 100 строк для ускорения
+                sample = df[col].head(100)
+                valid_qrs = sample.apply(is_valid_qr).sum()
+                if valid_qrs > 0:
+                    qr_counts[col] = valid_qrs
 
         if qr_counts:
             # Выбираем колонку с наибольшим количеством QR-кодов
             qr_column = max(qr_counts.items(), key=lambda x: x[1])[0]
             logger.info(f"Найдена колонка QR по содержимому: {qr_column} ({qr_counts[qr_column]} QR-кодов)")
 
-    # 3. Если колонку с сериями не нашли по имени, ищем по содержимому
-    if series_column is None:
-        series_counts = {}
-        for col in df.columns:
-            if col != qr_column:  # Исключаем колонку с QR
-                valid_series = df[col].apply(is_valid_series).sum()
-                if valid_series > 0:
-                    series_counts[col] = valid_series
+    # 4. Если не нашли серийный номер, используем первую колонку
+    if series_column is None and len(df.columns) > 0:
+        series_column = df.columns[0]
+        logger.info(f"Колонка с серийными номерами не найдена, используем первую колонку: {series_column}")
 
-        if series_counts:
-            # Выбираем колонку с наибольшим количеством серий
-            series_column = max(series_counts.items(), key=lambda x: x[1])[0]
-            logger.info(f"Найдена колонка Серия по содержимому: {series_column} ({series_counts[series_column]} серий)")
+    # 5. Если все еще не нашли QR, и есть минимум 2 колонки, используем вторую колонку
+    if qr_column is None and len(df.columns) > 1:
+        qr_column = df.columns[1] if df.columns[0] == series_column else df.columns[0]
+        logger.info(f"QR-колонка не найдена, используем колонку: {qr_column}")
 
-    # 4. Если все еще не нашли QR, используем первую колонку
-    if qr_column is None and len(df.columns) > 0:
-        qr_column = df.columns[0]
-        logger.info(f"QR-колонка не найдена, используем первую колонку: {qr_column}")
-
-    return qr_column, series_column
+    return series_column, qr_column
 
 
 def safe_read_excel(file_data, header=0):
@@ -137,12 +148,26 @@ def safe_read_excel(file_data, header=0):
         raise ValueError(f"Не удалось прочитать Excel-файл: {str(e)}")
 
 
+def extract_serial_from_qr(qr_code: str, serial_numbers: Set[str]) -> Optional[str]:
+    """Пытается найти серийный номер внутри QR-кода"""
+    if not qr_code:
+        return None
+
+
+    for serial in serial_numbers:
+        if serial and serial in qr_code:
+            return serial
+
+    return None
+
+
 async def compare_qr_codes(file1_data, file2_data):
-    """Улучшенное сравнение QR-кодов из двух файлов"""
+    """Сравнение серийных номеров из первого файла с QR-кодами из второго файла"""
+    start_time = time.time()
     try:
         logger.info("Начинаем сравнение файлов")
 
-        # Чтение первого файла (из ДЛО)
+        # Чтение первого файла (с серийными номерами)
         try:
             df1 = safe_read_excel(file1_data)
             logger.info(f"Первый файл успешно прочитан. Размер: {df1.shape}, Колонки: {df1.columns.tolist()}")
@@ -170,107 +195,99 @@ async def compare_qr_codes(file1_data, file2_data):
             logger.error(f"Ошибка при чтении второго файла: {e}")
             raise HTTPException(status_code=400, detail=f"Ошибка при чтении второго файла: {str(e)}")
 
-        # Находим колонки с QR-кодами и сериями
-        qr_column1, series_column = find_qr_series_columns(df1)
-        logger.info(f"Определены колонки в первом файле: QR={qr_column1}, Серия={series_column}")
+        # Находим колонки с серийными номерами и QR-кодами в первом файле
+        series_column, qr_column1 = find_qr_series_columns(df1)
+        logger.info(f"Определены колонки в первом файле: Серия={series_column}, QR={qr_column1}")
 
-        # Для второго файла находим колонку с QR-кодами
-        qr_column2, _ = find_qr_series_columns(df2)
+        # Находим колонку с QR-кодами во втором файле
+        _, qr_column2 = find_qr_series_columns(df2)
         logger.info(f"Определена колонка QR во втором файле: {qr_column2}")
 
-        # Очистка и подготовка QR-кодов
-        df1['clean_qr'] = df1[qr_column1].apply(clean_code)
-        df2['clean_qr'] = df2[qr_column2].apply(clean_code)
+        # Очистка и извлечение серийных номеров из первого файла
+        df1['clean_series'] = df1[series_column].apply(clean_code)
+        valid_series = df1['clean_series'].dropna()
+        series_set = set(valid_series)
 
-        # Фильтрация валидных QR-кодов
-        valid_qr1 = df1[df1['clean_qr'].apply(is_valid_qr)]
-        valid_qr2 = df2[df2['clean_qr'].apply(is_valid_qr)]
+        # Очистка и извлечение QR-кодов из первого файла (если есть)
+        if qr_column1:
+            df1['clean_qr1'] = df1[qr_column1].apply(clean_code)
 
-        logger.info(f"Валидных QR в первом файле: {len(valid_qr1)} из {len(df1)}")
-        logger.info(f"Валидных QR во втором файле: {len(valid_qr2)} из {len(df2)}")
+        # Очистка и извлечение QR-кодов из второго файла
+        df2['clean_qr2'] = df2[qr_column2].apply(clean_code)
+
+        # Подсчет общего количества непустых QR-кодов во втором файле
+        total_qr_count = df2['clean_qr2'].notna().sum()
 
         # Получаем уникальные QR-коды
-        qr_set1 = set(valid_qr1['clean_qr'].dropna())
-        qr_set2 = set(valid_qr2['clean_qr'].dropna())
+        valid_qr2 = df2['clean_qr2'].dropna()
+        qr_set2 = set(valid_qr2)
 
-        logger.info(f"Уникальных QR в первом файле: {len(qr_set1)}")
-        logger.info(f"Уникальных QR во втором файле: {len(qr_set2)}")
+        logger.info(f"Серийных номеров в первом файле: {len(series_set)} из {len(df1)}")
+        logger.info(f"Всего QR-кодов во втором файле: {total_qr_count}")
+        logger.info(f"Уникальных QR-кодов во втором файле: {len(qr_set2)}")
 
-        # Логируем несколько примеров QR-кодов для проверки
-        if qr_set1:
-            logger.info(f"Примеры QR из первого файла: {list(qr_set1)[:5]}")
+        # Логируем несколько примеров для проверки
+        if series_set:
+            logger.info(f"Примеры серийных номеров из первого файла: {list(series_set)[:5]}")
         if qr_set2:
-            logger.info(f"Примеры QR из второго файла: {list(qr_set2)[:5]}")
+            logger.info(f"Примеры QR-кодов из второго файла: {list(qr_set2)[:5]}")
 
-        # Сравниваем QR-коды
-        missing_in_df2 = qr_set1 - qr_set2  # Отсутствуют во втором файле
-        missing_in_df1 = qr_set2 - qr_set1  # Отсутствуют в первом файле
+        # Создаем словарь для сопоставления серийных номеров и QR-кодов
+        series_to_qr = {}
+        found_series = set()
+        matched_qrs = set()
+
+        # Для каждого QR-кода из второго файла пытаемся найти соответствующий серийный номер
+        for qr in qr_set2:
+            serial = extract_serial_from_qr(qr, series_set)
+            if serial:
+                series_to_qr[serial] = qr
+                found_series.add(serial)
+                matched_qrs.add(qr)
+
+        # Проверяем наличие разницы в серийных номерах и QR-кодах
+        series_not_in_qr = series_set - found_series  # Серийные номера, отсутствующие в QR-кодах
+        qr_not_matching_series = qr_set2 - matched_qrs  # QR-коды, не соответствующие ни одному серийному номеру
 
         # Подготавливаем результаты
-        differences_qr = []
         series_differences = []
+        qr_differences = []
         quantity_diff = ""
 
-        if len(qr_set1) != len(qr_set2):
-            quantity_diff = f"Количество товаров в файлах различается: В файле 1: {len(qr_set1)} | В файле 2: {len(qr_set2)}"
-            logger.info(quantity_diff)
+        # Формируем строку с информацией о количестве
+        quantity_diff = (
+            f"ИТОГОВАЯ СТАТИСТИКА:\n"
+            f"Серийных номеров в первом файле: {len(series_set)}\n"
+            f"Всего QR-кодов во втором файле: {total_qr_count}\n"
+            f"Уникальных QR-кодов во втором файле: {len(qr_set2)}\n"
+            f"Серийных номеров, найденных в QR-кодах: {len(found_series)}\n"
+            f"Серийных номеров, не найденных в QR-кодах: {len(series_not_in_qr)}\n"
+            f"QR-кодов, не соответствующих ни одному серийному номеру: {len(qr_not_matching_series)}"
+        )
+        logger.info(quantity_diff)
 
-        # Добавляем отсутствующие QR-коды в результаты
-        for qr in missing_in_df2:
-            differences_qr.append(f"Отправить Поставщику QR: {qr}")
+        # Добавляем отсутствующие серийные номера в результаты
+        for serial in series_not_in_qr:
+            series_differences.append(f"Серийный номер: {serial}")
 
-        for qr in missing_in_df1:
-            differences_qr.append(f"Поставщик должен нам отправить в ЭБД QR: {qr}")
-
-        # Проверяем серии в QR-кодах, если есть различия и есть колонка с сериями
-        if series_column and (missing_in_df1 or missing_in_df2):
-            logger.info("Проверяем серии внутри QR-кодов...")
-
-            # Получаем серии из первого файла (исключаем пустые)
-            series_data = valid_qr1[series_column].apply(clean_code).dropna()
-            valid_series = set(s for s in series_data if s and is_valid_series(s))
-
-            logger.info(f"Найдено {len(valid_series)} уникальных серий в первом файле")
-            if valid_series:
-                logger.info(f"Примеры серий: {list(valid_series)[:5]}")
-
-            # Проверяем каждую серию в QR-кодах второго файла
-            for series in valid_series:
-                found = False
-                for qr in qr_set2:
-                    if series in str(qr):
-                        found = True
-                        break
-
-                if not found:
-                    series_differences.append(f"Серия не найдена в QR: {series}")
-
-            # Проверяем QR-коды из второго файла на наличие серий из первого
-            for qr in qr_set2:
-                found = False
-                for series in valid_series:
-                    if series in str(qr):
-                        found = True
-                        break
-
-                if not found and qr not in missing_in_df1:  # Исключаем уже отмеченные QR
-                    series_differences.append(f"QR не содержит серий из первого файла: {qr}")
+        # Добавляем QR-коды, не соответствующие ни одному серийному номеру
+        for qr in qr_not_matching_series:
+            qr_differences.append(f"QR-код: {qr}")
 
         # Формируем файл с результатами если есть различия
-        if differences_qr or series_differences or quantity_diff:
+        if series_differences or qr_differences or quantity_diff:
             txt_path = os.path.join(STATIC_DIR, "filtered_differences.txt")
             with open(txt_path, "w", encoding="utf-8") as txt_file:
-                if quantity_diff:
-                    txt_file.write(f"{quantity_diff}\n\n")
-
-                if differences_qr:
-                    txt_file.write("QR-коды, которые необходимо обработать:\n")
-                    txt_file.write("\n".join(differences_qr))
-                    txt_file.write("\n\n")
+                txt_file.write(f"{quantity_diff}\n\n")
 
                 if series_differences:
-                    txt_file.write("Серии, которых нет в QR:\n")
+                    txt_file.write("=== СЕРИЙНЫЕ НОМЕРА, ОТСУТСТВУЮЩИЕ В QR-КОДАХ ===\n")
                     txt_file.write("\n".join(series_differences))
+                    txt_file.write("\n\n")
+
+                if qr_differences:
+                    txt_file.write("=== QR-КОДЫ, НЕ СООТВЕТСТВУЮЩИЕ НИ ОДНОМУ СЕРИЙНОМУ НОМЕРУ ===\n")
+                    txt_file.write("\n".join(qr_differences))
 
             logger.info(f"Создан файл с результатами: {txt_path}")
             return txt_path
@@ -281,6 +298,9 @@ async def compare_qr_codes(file1_data, file2_data):
     except Exception as e:
         logger.error(f"Ошибка при сравнении файлов: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Ошибка при сравнении файлов: {str(e)}")
+    finally:
+        elapsed_time = time.time() - start_time
+        logger.info(f"Общее время выполнения: {elapsed_time:.2f} секунд")
 
 
 @app.post("/compare/")
@@ -300,21 +320,21 @@ async def compare_files(file1: UploadFile = File(...), file2: UploadFile = File(
         txt_result = await compare_qr_codes(file1_data, file2_data)
 
         if txt_result is None:
-            return {"message": "Различий не найдено"}
+            return {"message": "Различий не найдено! Все серийные номера найдены в QR-кодах."}
 
         # Проверяем наличие информации о количестве товаров в результате
         has_quantity_diff = False
         try:
             with open(txt_result, "r", encoding="utf-8") as f:
                 content = f.read()
-                has_quantity_diff = "Количество товаров в файлах различается" in content
+                has_quantity_diff = "ИТОГОВАЯ СТАТИСТИКА" in content
         except Exception as e:
             logger.error(f"Ошибка при чтении файла результатов: {e}")
 
         # Формируем и возвращаем результат
         return {
             "txt_url": f"/static/{os.path.basename(txt_result)}",
-            "quantity_diff": "Количество товаров в файлах различается" if has_quantity_diff else ""
+            "quantity_diff": "Обнаружены расхождения" if has_quantity_diff else ""
         }
 
     except Exception as e:
@@ -326,180 +346,288 @@ async def compare_files(file1: UploadFile = File(...), file2: UploadFile = File(
 async def get_index():
     """Маршрут для обслуживания index.html"""
     try:
-        index_path = os.path.join(STATIC_DIR, "index.html")
-        if os.path.exists(index_path):
-            with open(index_path, "r", encoding="utf-8") as f:
-                return HTMLResponse(f.read())
-        else:
-            # Если файла нет, создаем базовую HTML-страницу
-            html_content = """
-            <!DOCTYPE html>
-            <html lang="ru">
-            <head>
-                <meta charset="UTF-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <title>Приход ЭБД</title>
-                <style>
-                    body { 
-                        font-family: Arial, sans-serif; 
-                        text-align: center; 
-                        margin: 50px; 
-                    }
-                    .container {
-                        max-width: 600px;
-                        margin: 0 auto;
-                        padding: 20px;
-                        border: 1px solid #ddd;
-                        border-radius: 5px;
-                    }
-                    h2 { margin-bottom: 20px; }
-                    input, button { 
-                        margin: 10px; 
-                        padding: 8px;
-                    }
-                    button {
-                        background-color: #4CAF50;
-                        color: white;
-                        border: none;
-                        padding: 10px 20px;
-                        cursor: pointer;
-                        border-radius: 4px;
-                    }
-                    #result { 
-                        margin-top: 30px;
-                        padding: 10px;
-                        border-radius: 4px;
-                    }
-                    #result.error {
-                        background-color: #f8d7da;
-                        color: #721c24;
-                    }
-                    #result.success {
-                        background-color: #d4edda;
-                        color: #155724;
-                    }
-                    .file-input {
-                        border: 1px solid #ddd;
-                        padding: 10px;
-                        margin: 10px 0;
-                        border-radius: 4px;
-                    }
-                    .file-label {
-                        display: block;
-                        margin-bottom: 5px;
-                        text-align: left;
-                        font-weight: bold;
-                    }
-                    #loading {
-                        display: none;
-                        margin-top: 20px;
-                    }
-                    .spinner {
-                        border: 4px solid #f3f3f3;
-                        border-top: 4px solid #3498db;
-                        border-radius: 50%;
-                        width: 30px;
-                        height: 30px;
-                        animation: spin 1s linear infinite;
-                        margin: 0 auto;
-                    }
-                    @keyframes spin {
-                        0% { transform: rotate(0deg); }
-                        100% { transform: rotate(360deg); }
-                    }
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <h2>Загрузка файлов для сравнения QR-кодов</h2>
+        html_content = """
+        <!DOCTYPE html>
+        <html lang="ru">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Сравнение серийных номеров и QR-кодов</title>
+            <style>
+                body { 
+                    font-family: Arial, sans-serif; 
+                    text-align: center; 
+                    margin: 0;
+                    padding: 0;
+                    background-color: #f5f5f5;
+                }
+                .container {
+                    max-width: 800px;
+                    margin: 30px auto;
+                    padding: 20px;
+                    background-color: white;
+                    border-radius: 8px;
+                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                }
+                h1 { 
+                    color: #2c3e50;
+                    margin-bottom: 30px;
+                }
+                .file-input {
+                    border: 1px solid #ddd;
+                    padding: 15px;
+                    margin: 15px 0;
+                    border-radius: 4px;
+                    background-color: #f9f9f9;
+                    text-align: left;
+                }
+                .file-label {
+                    display: block;
+                    margin-bottom: 10px;
+                    font-weight: bold;
+                    color: #34495e;
+                }
+                input[type="file"] {
+                    width: 100%;
+                    padding: 10px;
+                    border: 1px dashed #ccc;
+                    border-radius: 4px;
+                    box-sizing: border-box;
+                }
+                button {
+                    background-color: #3498db;
+                    color: white;
+                    border: none;
+                    padding: 12px 25px;
+                    margin: 20px 0;
+                    cursor: pointer;
+                    border-radius: 4px;
+                    font-size: 16px;
+                    transition: background-color 0.3s;
+                }
+                button:hover {
+                    background-color: #2980b9;
+                }
+                button:disabled {
+                    background-color: #95a5a6;
+                    cursor: not-allowed;
+                }
+                #result {
+                    margin-top: 30px;
+                    padding: 15px;
+                    border-radius: 4px;
+                    display: none;
+                }
+                #result.error {
+                    background-color: #f8d7da;
+                    color: #721c24;
+                    border: 1px solid #f5c6cb;
+                }
+                #result.success {
+                    background-color: #d4edda;
+                    color: #155724;
+                    border: 1px solid #c3e6cb;
+                }
+                #loading {
+                    display: none;
+                    margin: 20px auto;
+                }
+                .spinner {
+                    border: 5px solid #f3f3f3;
+                    border-top: 5px solid #3498db;
+                    border-radius: 50%;
+                    width: 40px;
+                    height: 40px;
+                    animation: spin 1s linear infinite;
+                    margin: 0 auto 15px;
+                }
+                @keyframes spin {
+                    0% { transform: rotate(0deg); }
+                    100% { transform: rotate(360deg); }
+                }
+                .footer {
+                    margin-top: 40px;
+                    color: #7f8c8d;
+                    font-size: 14px;
+                }
+                .download-link {
+                    display: inline-block;
+                    background-color: #27ae60;
+                    color: white;
+                    padding: 10px 20px;
+                    text-decoration: none;
+                    border-radius: 4px;
+                    margin-top: 15px;
+                    transition: background-color 0.3s;
+                }
+                .download-link:hover {
+                    background-color: #2ecc71;
+                }
+                #quantity-diff {
+                    margin-top: 15px;
+                    padding: 10px;
+                    background-color: #fff3cd;
+                    color: #856404;
+                    border: 1px solid #ffeeba;
+                    border-radius: 4px;
+                    display: none;
+                }
+                .info-text {
+                    color: #7f8c8d;
+                    font-size: 14px;
+                    margin-top: 5px;
+                }
+                .instructions {
+                    text-align: left;
+                    background-color: #e8f4f8;
+                    padding: 15px;
+                    border-radius: 4px;
+                    margin: 20px 0;
+                    color: #2c3e50;
+                }
+                .instructions h3 {
+                    margin-top: 0;
+                    color: #3498db;
+                }
+                .instructions ul {
+                    margin-bottom: 0;
+                    padding-left: 20px;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Сравнение серийных номеров и QR-кодов</h1>
 
-                    <div class="file-input">
-                        <div class="file-label">Первый файл (из ДЛО):</div>
-                        <input type="file" id="file1" accept=".xlsx,.xls">
-                    </div>
-
-                    <div class="file-input">
-                        <div class="file-label">Второй файл (отсканированные QR):</div>
-                        <input type="file" id="file2" accept=".xlsx,.xls">
-                    </div>
-
-                    <button onclick="uploadFiles()">Сравнить файлы</button>
-
-                    <div id="loading">
-                        <div class="spinner"></div>
-                        <p>Выполняется сравнение файлов...</p>
-                    </div>
-
-                    <div id="result" style="display:none;"></div>
-                    <div id="quantity-diff" class="quantity-difference" style="display:none;"></div>
+                <div class="instructions">
+                    <h3>Как использовать:</h3>
+                    <ul>
+                        <li>Загрузите первый файл с серийными номерами товаров</li>
+                        <li>Загрузите второй файл с отсканированными QR-кодами</li>
+                        <li>Нажмите кнопку "Сравнить файлы"</li>
+                        <li>Система проведет полное сравнение и покажет:</li>
+                        <ul>
+                            <li>Серийные номера, отсутствующие в QR-кодах</li>
+                            <li>QR-коды, не соответствующие ни одному серийному номеру</li>
+                        </ul>
+                    </ul>
                 </div>
 
-                <script>
-                    const SERVER_URL = window.location.origin;
+                <div class="file-input">
+                    <div class="file-label">Первый файл (с серийными номерами):</div>
+                    <input type="file" id="file1" accept=".xlsx,.xls">
+                    <div class="info-text">Excel-файл с серийными номерами товаров</div>
+                </div>
 
-                    async function uploadFiles() {
-                        let file1 = document.getElementById("file1").files[0];
-                        let file2 = document.getElementById("file2").files[0];
-                        const resultDiv = document.getElementById("result");
-                        const quantityDiffDiv = document.getElementById("quantity-diff");
-                        const loadingDiv = document.getElementById("loading");
+                <div class="file-input">
+                    <div class="file-label">Второй файл (отсканированные QR-коды):</div>
+                    <input type="file" id="file2" accept=".xlsx,.xls">
+                    <div class="info-text">Excel-файл с фактически отсканированными QR-кодами</div>
+                </div>
 
-                        resultDiv.style.display = "none";
-                        quantityDiffDiv.style.display = "none";
+                <button id="compare-btn" onclick="uploadFiles()">Сравнить файлы</button>
 
-                        if (!file1 || !file2) {
-                            alert("Пожалуйста, загрузите оба файла!");
-                            return;
-                        }
+                <div id="loading">
+                    <div class="spinner"></div>
+                    <p>Выполняется сравнение файлов...</p>
+                    <p class="info-text">Для больших файлов это может занять несколько минут</p>
+                </div>
 
-                        loadingDiv.style.display = "block";
+                <div id="result"></div>
+                <div id="quantity-diff"></div>
 
-                        let formData = new FormData();
-                        formData.append("file1", file1);
-                        formData.append("file2", file2);
+                <div class="footer">
+                    Система сравнения серийных номеров и QR-кодов © 2025
+                </div>
+            </div>
 
-                        try {
-                            let response = await fetch(`${SERVER_URL}/compare/`, {
-                                method: "POST",
-                                body: formData
-                            });
+            <script>
+                const SERVER_URL = window.location.origin;
+                const compareBtn = document.getElementById("compare-btn");
+                const file1Input = document.getElementById("file1");
+                const file2Input = document.getElementById("file2");
 
-                            if (!response.ok) {
-                                let error = await response.json();
-                                throw new Error(error.detail || "Произошла ошибка на сервере");
-                            }
+                // Активировать/деактивировать кнопку в зависимости от выбора файлов
+                function updateButtonState() {
+                    compareBtn.disabled = !(file1Input.files.length > 0 && file2Input.files.length > 0);
+                }
 
-                            let result = await response.json();
-                            resultDiv.style.display = "block";
+                file1Input.addEventListener('change', updateButtonState);
+                file2Input.addEventListener('change', updateButtonState);
+                updateButtonState(); // Инициализация
 
-                            if (result.message) {
-                                resultDiv.innerHTML = `<p>${result.message}</p>`;
-                                resultDiv.className = "success";
-                                quantityDiffDiv.style.display = "none";
-                            } else {
-                                resultDiv.innerHTML = `
-                                    ${result.txt_url ? `<a href="${SERVER_URL}${result.txt_url}" download>📥 Скачать различия (TXT)</a>` : ""}
-                                `;
-                                resultDiv.className = "error";
+                async function uploadFiles() {
+                    let file1 = document.getElementById("file1").files[0];
+                    let file2 = document.getElementById("file2").files[0];
+                    const resultDiv = document.getElementById("result");
+                    const quantityDiffDiv = document.getElementById("quantity-diff");
+                    const loadingDiv = document.getElementById("loading");
+                    const compareBtn = document.getElementById("compare-btn");
 
-                                if (result.quantity_diff) {
-                                    quantityDiffDiv.innerHTML = result.quantity_diff;
-                                    quantityDiffDiv.style.display = "block";
-                                }
-                            }
-                        } catch (error) {
-                            resultDiv.style.display = "block";
-                            resultDiv.innerHTML = `<p>Ошибка при загрузке файлов: ${error.message}</p>`;
-                            resultDiv.className = "error";
-                        } finally {
-                            loadingDiv.style.display = "none";
-                        }
+                    resultDiv.style.display = "none";
+                    quantityDiffDiv.style.display = "none";
+
+                    if (!file1 || !file2) {
+                        alert("Пожалуйста, загрузите оба файла!");
+                        return;
                     }
-                </script>
-            </body>
-            </html>
-            """
-            return HTMLResponse(html_content)
+
+                    // Проверка размеров файлов
+                    if (file1.size > 50 * 1024 * 1024 || file2.size > 50 * 1024 * 1024) {
+                        alert("Размер файла слишком большой (более 50 МБ). Пожалуйста, используйте файлы меньшего размера.");
+                        return;
+                    }
+
+                    loadingDiv.style.display = "block";
+                    compareBtn.disabled = true;
+
+                    let formData = new FormData();
+                    formData.append("file1", file1);
+                    formData.append("file2", file2);
+
+                    try {
+                        let response = await fetch(`${SERVER_URL}/compare/`, {
+                            method: "POST",
+                            body: formData
+                        });
+
+                        if (!response.ok) {
+                            let error = await response.json();
+                            throw new Error(error.detail || "Произошла ошибка на сервере");
+                        }
+
+                        let result = await response.json();
+                        resultDiv.style.display = "block";
+
+                        if (result.message) {
+                            resultDiv.innerHTML = `<p>${result.message}</p>`;
+                            resultDiv.className = "success";
+                            quantityDiffDiv.style.display = "none";
+                        } else {
+                            resultDiv.innerHTML = `
+                                ${result.txt_url ? `<a href="${SERVER_URL}${result.txt_url}" class="download-link" download>📥 Скачать файл с результатами сравнения</a>` : ""}
+                            `;
+                            resultDiv.className = "error";
+
+                            if (result.quantity_diff) {
+                                quantityDiffDiv.innerHTML = result.quantity_diff;
+                                quantityDiffDiv.style.display = "block";
+                            }
+                        }
+                    } catch (error) {
+                        resultDiv.style.display = "block";
+                        resultDiv.innerHTML = `<p>Ошибка при обработке файлов: ${error.message}</p>`;
+                        resultDiv.className = "error";
+                    } finally {
+                        loadingDiv.style.display = "none";
+                        compareBtn.disabled = false;
+                    }
+                }
+            </script>
+        </body>
+        </html>
+        """
+        return HTMLResponse(html_content)
     except Exception as e:
         logger.error(f"Ошибка при загрузке index.html: {str(e)}")
         raise HTTPException(status_code=500, detail="Ошибка при загрузке страницы")
