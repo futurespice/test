@@ -187,81 +187,76 @@
         const SERVER_URL = window.location.origin;
 
         async function uploadFiles() {
-            let file1 = document.getElementById("file1").files[0];
-            let file2 = document.getElementById("file2").files[0];
-            const compareButton = document.getElementById("compareButton");
-            const loadingIndicator = document.getElementById("loadingIndicator");
-            const resultDiv = document.getElementById("result");
-            const quantityDiffDiv = document.getElementById("quantity-diff");
+    let file1 = document.getElementById("file1").files[0];
+    let file2 = document.getElementById("file2").files[0];
+    const resultDiv = document.getElementById("result");
+    const quantityDiffDiv = document.getElementById("quantity-diff");
+    const loadingDiv = document.getElementById("loading");
+    const compareBtn = document.getElementById("compare-btn");
 
-            // Сброс предыдущих результатов
-            resultDiv.style.display = "none";
-            resultDiv.className = "";
+    resultDiv.style.display = "none";
+    quantityDiffDiv.style.display = "none";
+
+    if (!file1 || !file2) {
+        alert("Пожалуйста, загрузите оба файла!");
+        return;
+    }
+
+    // Проверка размеров файлов
+    if (file1.size > 50 * 1024 * 1024 || file2.size > 50 * 1024 * 1024) {
+        alert("Размер файла слишком большой (более 50 МБ). Пожалуйста, используйте файлы меньшего размера.");
+        return;
+    }
+
+    loadingDiv.style.display = "block";
+    compareBtn.disabled = true;
+
+    let formData = new FormData();
+    formData.append("file1", file1);
+    formData.append("file2", file2);
+
+    try {
+        let response = await fetch(`${SERVER_URL}/compare/`, {
+            method: "POST",
+            body: formData
+        });
+
+        if (!response.ok) {
+            let error = await response.json();
+            throw new Error(error.detail || "Произошла ошибка на сервере");
+        }
+
+        let result = await response.json();
+        resultDiv.style.display = "block";
+
+        if (result.message) {
+            resultDiv.innerHTML = `<p>${result.message}</p>`;
+            resultDiv.className = "success";
             quantityDiffDiv.style.display = "none";
+        } else {
+            // Используем уникальное имя файла для ссылки на скачивание
+            resultDiv.innerHTML = `
+                ${result.txt_url ? `<a href="${SERVER_URL}${result.txt_url}" class="download-link" download="${result.filename || 'результат_сравнения.txt'}">📥 Скачать файл с результатами сравнения</a>` : ""}
+            `;
+            resultDiv.className = "error";
 
-            if (!file1 || !file2) {
-                alert("Пожалуйста, загрузите оба файла!");
-                return;
-            }
-
-            // Показываем индикатор загрузки
-            compareButton.disabled = true;
-            loadingIndicator.style.display = "block";
-
-            // Создаем объект FormData для отправки файлов
-            let formData = new FormData();
-            formData.append("file1", file1);
-            formData.append("file2", file2);
-
-            try {
-                // Отображаем более детальную информацию о процессе
-                const loadingDetails = document.getElementById("loadingDetails");
-                loadingDetails.textContent = "Загрузка файлов на сервер...";
-
-                // Отправляем запрос
-                let response = await fetch(`${SERVER_URL}/compare/`, {
-                    method: "POST",
-                    body: formData
-                });
-
-                loadingDetails.textContent = "Анализ данных...";
-
-                if (!response.ok) {
-                    let error = await response.json();
-                    throw new Error(error.detail || "Произошла ошибка на сервере");
-                }
-
-                let result = await response.json();
-
-                // Показываем результаты
-                resultDiv.style.display = "block";
-
-                if (result.message) {
-                    // Нет различий
-                    resultDiv.innerHTML = `<p>${result.message}</p>`;
-                    resultDiv.className = "success";
-                } else {
-                    // Есть различия
-                    resultDiv.innerHTML = `
-                        ${result.txt_url ? `<a href="${SERVER_URL}${result.txt_url}" download>📥 Скачать отчет о различиях (TXT)</a>` : ""}
-                    `;
-                    resultDiv.className = "error";
-
-                    if (result.quantity_diff) {
-                        quantityDiffDiv.innerHTML = result.quantity_diff;
-                        quantityDiffDiv.style.display = "block";
-                    }
-                }
-            } catch (error) {
-                resultDiv.style.display = "block";
-                resultDiv.innerHTML = `<p>Ошибка при обработке файлов: ${error.message}</p>`;
-                resultDiv.className = "error";
-            } finally {
-                // Скрываем индикатор загрузки
-                loadingIndicator.style.display = "none";
-                compareButton.disabled = false;
+            if (result.quantity_diff) {
+                quantityDiffDiv.innerHTML = result.quantity_diff;
+                quantityDiffDiv.style.display = "block";
             }
         }
+    } catch (error) {
+        resultDiv.style.display = "block";
+        resultDiv.innerHTML = `<p>Ошибка при обработке файлов: ${error.message}</p>`;
+        resultDiv.className = "error";
+    } finally {
+        loadingDiv.style.display = "none";
+        compareBtn.disabled = false;
+    }
+}
+
+
+
 
         // Добавляем обработчики событий для проверки наличия файлов
         document.getElementById("file1").addEventListener("change", updateButtonState);

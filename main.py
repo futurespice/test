@@ -4,11 +4,9 @@ from fastapi.staticfiles import StaticFiles
 import pandas as pd
 import numpy as np
 from io import BytesIO
-import os
-import logging
-import re
-import time
+import logging, re, time, os
 from typing import Tuple, Set, List, Dict, Optional
+import uuid, datetime
 
 # Настройка логирования
 logging.basicConfig(
@@ -276,7 +274,12 @@ async def compare_qr_codes(file1_data, file2_data):
 
         # Формируем файл с результатами если есть различия
         if series_differences or qr_differences or quantity_diff:
-            txt_path = os.path.join(STATIC_DIR, "filtered_differences.txt")
+            # Генерируем уникальное имя файла с результатами
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            unique_id = str(uuid.uuid4())[:8]  # Берем первые 8 символов UUID
+            filename = f"comparison_{timestamp}_{unique_id}.txt"
+            txt_path = os.path.join(STATIC_DIR, filename)
+
             with open(txt_path, "w", encoding="utf-8") as txt_file:
                 txt_file.write(f"{quantity_diff}\n\n")
 
@@ -303,11 +306,57 @@ async def compare_qr_codes(file1_data, file2_data):
         logger.info(f"Общее время выполнения: {elapsed_time:.2f} секунд")
 
 
+def cleanup_old_files(directory=STATIC_DIR, max_files=50, max_age_days=7):
+    """
+    Очищает старые файлы результатов сравнения.
+    Оставляет не более max_files файлов и удаляет файлы старше max_age_days дней.
+    """
+    try:
+        # Получаем список файлов результатов
+        files = [os.path.join(directory, f) for f in os.listdir(directory)
+                 if f.startswith('comparison_') and f.endswith('.txt')]
+
+        if not files:
+            return
+
+        # Сортируем файлы по времени изменения (от старых к новым)
+        files.sort(key=lambda x: os.path.getmtime(x))
+
+        # Удаляем старые файлы, оставляя максимум max_files
+        if len(files) > max_files:
+            for file_path in files[:-max_files]:
+                try:
+                    os.remove(file_path)
+                    logger.info(f"Удален старый файл: {file_path}")
+                except Exception as e:
+                    logger.error(f"Ошибка при удалении файла {file_path}: {e}")
+
+        # Удаляем файлы старше max_age_days дней
+        current_time = time.time()
+        max_age_seconds = max_age_days * 24 * 60 * 60
+
+        for file_path in files:
+            file_age = current_time - os.path.getmtime(file_path)
+            if file_age > max_age_seconds:
+                try:
+                    os.remove(file_path)
+                    logger.info(f"Удален устаревший файл: {file_path}")
+                except Exception as e:
+                    logger.error(f"Ошибка при удалении файла {file_path}: {e}")
+
+    except Exception as e:
+        logger.error(f"Ошибка при очистке старых файлов: {e}")
+
+
+
 @app.post("/compare/")
 async def compare_files(file1: UploadFile = File(...), file2: UploadFile = File(...)):
     """Обработка запроса на сравнение файлов"""
     try:
         logger.info(f"Получен запрос на сравнение файлов: {file1.filename} и {file2.filename}")
+
+        # Очистка старых файлов перед созданием новых
+        cleanup_old_files()
 
         # Чтение файлов в память
         file1_data = await file1.read()
@@ -322,6 +371,9 @@ async def compare_files(file1: UploadFile = File(...), file2: UploadFile = File(
         if txt_result is None:
             return {"message": "Различий не найдено! Все серийные номера найдены в QR-кодах."}
 
+        # Извлекаем только имя файла из полного пути
+        filename = os.path.basename(txt_result)
+
         # Проверяем наличие информации о количестве товаров в результате
         has_quantity_diff = False
         try:
@@ -333,7 +385,8 @@ async def compare_files(file1: UploadFile = File(...), file2: UploadFile = File(
 
         # Формируем и возвращаем результат
         return {
-            "txt_url": f"/static/{os.path.basename(txt_result)}",
+            "txt_url": f"/static/{filename}",
+            "filename": filename,
             "quantity_diff": "Обнаружены расхождения" if has_quantity_diff else ""
         }
 
